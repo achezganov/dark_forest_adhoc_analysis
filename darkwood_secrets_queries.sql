@@ -4,7 +4,7 @@
  * активность игроков при совершении внутриигровых покупок
  * 
  * Автор: Чезганов Алексей
- * Дата: 24.11.25
+ * Дата: 1.12.25 (дата редакции)
 */
 
 -- Часть 1. Исследовательский анализ данных
@@ -12,16 +12,12 @@
 
 -- 1.1. Доля платящих пользователей по всем данным:
 
--- Т.к. в поле "payer" значения либо 0, либо 1, можно использовать в качестве подсчета сумму.
+-- Т.к. в поле "payer" значения либо 0, либо 1, можно использовать в качестве подсчета среднее значение.
 SELECT
-    *,
-    ROUND(total_payers / total_players, 4) * 100 AS share_of_payers -- доля плательщиков
-FROM (
-        SELECT
-            COUNT(*)::numeric AS total_players, -- всего игроков
-            SUM(payer)        AS total_payers -- всего плательщиков
-        FROM fantasy.users
-     ) AS tp;
+    COUNT(*) AS total_players, -- всего игроков
+    SUM(payer) AS total_payers, -- всего плательщиков
+    ROUND(AVG(payer), 4) * 100 AS share_of_payers -- доля плательщиков
+FROM fantasy.users;
 
 -- 1.2. Доля платящих пользователей в разрезе расы персонажа:
 
@@ -38,21 +34,23 @@ FROM (
     FROM fantasy.users    AS u
         JOIN fantasy.race AS r USING(race_id)
     GROUP BY r.race)
-AS races_shape;
+AS races_shape
+ORDER BY payers_percent DESC;
 
 -- Задача 2. Исследование внутриигровых покупок
 -- 2.1. Статистические показатели по полю amount:
 
 SELECT DISTINCT
-    COUNT(*)                                               AS total_purchases, -- общее кол-во покупок
-    SUM(amount)                                            AS total_turnover, -- оборот "райских лепестков"
-    MAX(amount)                                            AS max_amount, -- максимальная транзакция
-    MIN(amount)                                            AS min_amount, -- минимальная транзакция
-    AVG(amount)                                            AS avg_amount, -- среднее значение транзакции
-    STDDEV(amount)                                         AS standard_deviation, -- стандартное отклонение
-    PERCENTILE_DISC(0.25) WITHIN GROUP ( ORDER BY amount ) AS q1, -- 1-ый квартиль
-    PERCENTILE_DISC(0.5) WITHIN GROUP ( ORDER BY amount )  AS q2, -- 2-ой квартиль, медиана
-    PERCENTILE_DISC(0.75) WITHIN GROUP ( ORDER BY amount ) AS q3  -- 3-ий квартиль
+    COUNT(*)                                                  AS total_purchases, -- общее кол-во покупок
+    SUM(amount)                                               AS total_turnover, -- оборот "райских лепестков"
+    MAX(amount)                                               AS max_amount, -- максимальная транзакция
+    MIN(amount)                                               AS min_amount, -- минимальная транзакция
+    (SELECT MIN(amount) FROM fantasy.events WHERE amount > 0) AS min_non_zero_amount, -- мин. без нулевых покупок
+    AVG(amount)                                               AS avg_amount, -- среднее значение транзакции
+    STDDEV(amount)                                            AS standard_deviation, -- стандартное отклонение
+    PERCENTILE_DISC(0.25) WITHIN GROUP ( ORDER BY amount )    AS q1, -- 1-ый квартиль
+    PERCENTILE_DISC(0.5) WITHIN GROUP ( ORDER BY amount )     AS q2, -- 2-ой квартиль, медиана
+    PERCENTILE_DISC(0.75) WITHIN GROUP ( ORDER BY amount )    AS q3  -- 3-ий квартиль
 FROM fantasy.events;
 
 -- 2.2: Аномальные нулевые покупки:
@@ -63,6 +61,15 @@ SELECT
     ROUND( SUM( CASE WHEN amount = 0 THEN 1 ELSE 0 END )::numeric / COUNT(*), 4 ) * 100 AS zero_amt_share_percent -- доля
                                                                                                     -- от всех покупок
 FROM fantasy.events;
+
+-- Запрос показывает id игрока и то, сколько он совершил покупок с нулевой стоимостью.
+SELECT
+    id,
+    COUNT(*) AS count_of_zero_amt_per_player -- количество покупок с нулевой стоимостью у игрока
+FROM fantasy.events
+WHERE amount = 0
+GROUP BY id
+ORDER BY count_of_zero_amt_per_player DESC;
 
 -- Запрос демонстрирует, что всего 907 "нулевых" покупок, в частности видно, что покупали только 1 предмет,
 -- либо это акция, что требует дополнительного анализа, можно смотреть как распределяются выбросы на протяжении времени,
@@ -152,77 +159,50 @@ GROUP BY i.game_items, ts.total_purchases, ts.total_buyers
 ORDER BY unique_buyers DESC; -- метрика оценки популярности у игроков (чем больше предмет был в ходу,
                             --  тем он популярнее.
 
+-- запрос демонстрирует список предметов, которые ни разу не покупали
+SELECT
+    game_items
+FROM fantasy.items       AS i
+LEFT JOIN fantasy.events AS e USING(item_code)
+WHERE transaction_id IS NULL;
+
 -- Часть 2. Решение ad hoc-задачи
 -- Задача: Зависимость активности игроков от расы персонажа:
 
---CTE для нахождения количества требуемых категорий игроков в разрезе рас
-WITH total_players AS -- кол-во игоков в расе
-    (
-        SELECT
-            race_id,
-            COUNT(*)   AS players
-        FROM fantasy.users
-        GROUP BY race_id
-    ),
-    total_buyers AS -- кол-во покупателей в расе
-    (
-        SELECT
-            u.race_id,
-            COUNT(DISTINCT u.id) AS buyers
-        FROM fantasy.events
-            JOIN fantasy.users AS u USING (id)
-        GROUP BY u.race_id
-    ),
-    total_payers AS -- кол-во плательщиков среди покупателей в расе
-    (
-        SELECT
-            u.race_id,
-            COUNT(*) AS payers
-        FROM
-            (
-                SELECT DISTINCT
-                    id
-                FROM fantasy.events
-            ) AS dist_buyers_ids
-            JOIN fantasy.users AS u USING (id)
-        WHERE u.payer = 1
-        GROUP BY race_id
-    ),
-    race_user_stat AS -- характеристики на 1 покупателя в разрезе рас
-    (
-        SELECT
-            race_id,
-            ROUND(AVG(count_of_purchases)::numeric, 2) AS avg_count_of_purchases,
-            ROUND(AVG(total_amt)::numeric, 2)          AS avg_total_amt,
-            ROUND(AVG(avg_amt_per_buyer)::numeric, 2)  AS avg_amt
-        FROM (
-                 -- на каждого человека считаем
-                 SELECT
-                     id,
-                     COUNT(*)    AS count_of_purchases, -- кол-во покупок
-                     SUM(amount) AS total_amt, -- суммарная стоимость покупок
-                     AVG(amount) AS avg_amt_per_buyer -- средняя стоимость одной покупки
-                 FROM fantasy.events
-                 WHERE amount > 0 -- отсекаем нулевые покупки
-                 GROUP BY id)       AS user_stat
-                 JOIN fantasy.users AS u USING (id)
-        GROUP BY race_id
-    )
+WITH registered_players AS
+         (
+             -- количество зарегистрированных игроков по расам
+             SELECT
+                 race_id,
+                 COUNT(*) AS total_players
+             FROM fantasy.users
+             GROUP BY race_id
+         ),
+     purchase_stats AS
+         (
+             -- все показатели, связанные с покупками (исключаем нулевые покупки везде)
+             SELECT
+                 u.race_id,
+                 COUNT(DISTINCT CASE WHEN u.payer = 1 THEN e.id END) AS payers,
+                 COUNT(DISTINCT e.id)                                AS buyers,
+                 COUNT(*)                                            AS total_purchases,
+                 SUM(e.amount)                                       AS total_amount
+             FROM fantasy.events         AS e
+                      JOIN fantasy.users AS u USING (id)
+             WHERE e.amount > 0  -- отсекаем нулевые покупки
+             GROUP BY u.race_id
+         )
 SELECT
-    race,
-    players, -- количество игроков в расе
-    buyers, -- количество покупателей в расе
-    payers, -- количество плательщиков среди покупателей в расе
-    ROUND(buyers::numeric / players * 100, 2)  AS share_of_buyers, -- доля покупателей в расе
-    ROUND(payers::numeric / buyers * 100, 2)   AS share_of_payers, -- доля плательщиков среди покупателей в расе
-    avg_count_of_purchases, -- среднее кол-во покупок на покупателя в расе
-    avg_amt, -- среднее стоимости покупки на покупателя
-    avg_total_amt -- среднее суммарного значения всех покупок покупателя
-
-FROM total_players
-    JOIN total_buyers   USING (race_id)
-    JOIN total_payers   USING (race_id)
-    JOIN race_user_stat USING (race_id)
-    JOIN fantasy.race   USING (race_id);
-
-
+    r.race,
+    rp.total_players                                        AS players, -- количество игроков в расе
+    ps.buyers,                                                          -- количество покупателей в расе
+    ps.payers,                                                          -- количество плательщиков среди покупателей в расе
+    ROUND(ps.buyers::numeric / rp.total_players * 100, 2)   AS share_of_buyers, -- доля покупателей в расе
+    ROUND(ps.payers::numeric / ps.buyers * 100, 2)          AS share_of_payers, -- доля плательщиков среди покупателей в расе
+    ROUND(ps.total_purchases::numeric / ps.buyers, 2)       AS avg_count_of_purchases, -- среднее кол-во покупок
+    ROUND(ps.total_amount::numeric / ps.total_purchases, 2) AS avg_purchase_amount, -- среднее стоимости покупки
+    ROUND(ps.total_amount::numeric / ps.buyers, 2)          AS avg_total_amt_per_buyer -- среднее суммарного значения всех покупок
+FROM registered_players      AS rp
+         JOIN purchase_stats AS ps USING (race_id)
+         JOIN fantasy.race   AS r  USING (race_id)
+ORDER BY avg_purchase_amount DESC;
